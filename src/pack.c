@@ -40,6 +40,13 @@ static int pack_entry_find_offset(
 		const git_oid *short_oid,
 		size_t len);
 
+/**
+ * Generate the chain of dependencies which we need to get to the
+ * object at `off`. As we use a stack, the latest is the base object,
+ * the rest are deltas.
+ */
+static int pack_dependency_chain(git_dependency_chain *chain, struct git_pack_file *p, git_off_t off);
+
 static int packfile_error(const char *message)
 {
 	giterr_set(GITERR_ODB, "Invalid pack file - %s", message);
@@ -581,8 +588,9 @@ int git_packfile_unpack(
 	git_off_t *obj_offset)
 {
 	git_mwindow *w_curs = NULL;
-	git_off_t curpos = *obj_offset;
+	git_off_t curpos = *obj_offset, current_obj;
 	int error;
+	git_dependency_chain chain;
 
 	size_t size = 0;
 	git_otype type;
@@ -591,9 +599,17 @@ int git_packfile_unpack(
 	 * TODO: optionally check the CRC on the packfile
 	 */
 
+	/*
+	error = pack_dependency_chain(&chain, p, *obj_offset);
+	if (error < 0)
+		return error;
+	*/
+
 	obj->data = NULL;
 	obj->len = 0;
 	obj->type = GIT_OBJ_BAD;
+
+	/* instead -> pack_dependency_chain(&chain, p, obj_offset) */
 
 	error = git_packfile_unpack_header(&size, &type, &p->mwf, &w_curs, &curpos);
 	git_mwindow_close(&w_curs);
@@ -1214,4 +1230,67 @@ int git_pack_entry_find(
 
 	git_oid_cpy(&e->sha1, &found_oid);
 	return 0;
+}
+
+static int pack_dependency_chain(git_dependency_chain *chain_out, struct git_pack_file *p, git_off_t obj_offset)
+{
+	git_dependency_chain chain = GIT_ARRAY_INIT;
+	git_mwindow *w_curs = NULL;
+	git_off_t curpos = obj_offset, base_offset, *dep_offset;
+	int error = 0, found_base = 0;
+	size_t size;
+	git_otype type;
+
+	while (!found_base && error == 0) {
+		curpos = obj_offset;
+		dep_offset = git_array_alloc(chain);
+		if (!dep_offset)
+			return -1;
+
+		*dep_offset = obj_offset;
+		error = git_packfile_unpack_header(&size, &type, &p->mwf, &w_curs, &curpos);
+		git_mwindow_close(&w_curs);
+
+		if (error < 0)
+			return error;
+
+
+		switch (type) {
+		case GIT_OBJ_OFS_DELTA:
+		case GIT_OBJ_REF_DELTA:
+			base_offset = get_delta_base(p, &w_curs, &curpos, type, obj_offset);
+			git_mwindow_close(&w_curs);
+			if (base_offset == 0)
+				return packfile_error("delta offset is zero");
+			if (base_offset < 0) /* must actually be an error code */
+				return (int)base_offset;
+
+			/* go through the loop again, but with the new object */
+			obj_offset = base_offset;
+			break;
+
+		/* one of these means we've found the final object in the chain */
+		case GIT_OBJ_COMMIT:
+		case GIT_OBJ_TREE:
+		case GIT_OBJ_BLOB:
+		case GIT_OBJ_TAG:
+			found_base = 1;
+			break;
+
+		default:
+			error = packfile_error("invalid packfile type in header");
+			break;
+		}
+	}
+
+	if (!found_base) {
+		git_array_clear(chain);
+		return packfile_error("after dependency chain loop; cannot happen");
+	}
+
+	if (error < 0)
+		git_array_clear(chain);
+
+	*chain_out = chain;
+	return error;
 }

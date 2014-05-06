@@ -17,6 +17,7 @@
 #include "mwindow.h"
 #include "odb.h"
 #include "oidmap.h"
+#include "array.h"
 
 #define GIT_PACK_FILE_MODE 0444
 
@@ -59,6 +60,8 @@ typedef struct git_pack_cache_entry {
 	git_atomic refcount;
 	git_rawobj raw;
 } git_pack_cache_entry;
+
+typedef git_array_t(git_off_t) git_dependency_chain;
 
 #include "offmap.h"
 
